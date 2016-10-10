@@ -17,13 +17,7 @@
 
 package org.pentaho.platform.dataaccess.datasource.wizard.service.impl;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
+import com.thoughtworks.xstream.XStream;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.pentaho.agilebi.modeler.geo.GeoContext;
@@ -50,7 +44,14 @@ import org.pentaho.platform.dataaccess.datasource.wizard.sources.query.QueryData
 import org.pentaho.platform.engine.core.system.PentahoBase;
 import org.pentaho.platform.engine.core.system.PentahoSessionHolder;
 
-import com.thoughtworks.xstream.XStream;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class MultitableDatasourceService extends PentahoBase implements IGwtJoinSelectionService {
 
@@ -111,15 +112,17 @@ public class MultitableDatasourceService extends PentahoBase implements IGwtJoin
     return schemas;
   }
 
-  public List<String> getDatabaseTables( IDatabaseConnection connection, String schema )
-    throws DatasourceServiceException {
+  public List<String> getDatabaseTables( IDatabaseConnection connection, String schema ) throws
+    DatasourceServiceException {
+
     try {
       DatabaseMeta databaseMeta = this.getDatabaseMeta( connection );
       Database database = new Database( null, databaseMeta );
       database.connect();
       String[] tableNames = database.getTablenames( schema, true );
+      String[] tableNamesWithoutScheme = database.getTablenames( schema, false );
       List<String> tables = new ArrayList<String>();
-      tables.addAll( Arrays.asList( tableNames ) );
+      tables.addAll( filterTablesCanSelect( schema, tableNames, tableNamesWithoutScheme, database ) );
       tables.addAll( Arrays.asList( database.getViews( schema, true ) ) );
       database.disconnect();
       return tables;
@@ -130,6 +133,46 @@ public class MultitableDatasourceService extends PentahoBase implements IGwtJoin
       logger.error( "Error getting database meta", e );
       throw new DatasourceServiceException( e );
     }
+  }
+
+  private List<String> filterTablesCanSelect( String schema, String[] tableNamesWithAlias, String[] tableNames, Database database )
+    throws DatasourceServiceException {
+    Long start = System.currentTimeMillis();
+    List<String> filteredTables = new ArrayList<String>();
+    for ( int i = 0; i< tableNames.length; i++ ) {
+      ResultSet columns = null;
+      String tableNameWithAlias = tableNamesWithAlias[ i ];
+      try {
+        String tableName = tableNames[ i ];
+        columns = database.getConnection().getMetaData().getColumns( null, schema, tableName, null );
+        while ( columns.next() ) {
+          String column_name = columns.getString( "COLUMN_NAME" );
+          if ( database.checkColumnExists( column_name, tableName ) ) {
+            //go to first column that has read access in table
+            filteredTables.add( tableNameWithAlias );
+            break;
+          }
+        }
+
+      } catch ( KettleDatabaseException e ) {
+        logger.error( "Error accessing database information for " + tableNameWithAlias + ": ", e );
+      } catch ( SQLException e ) {
+        logger.error( "Error accessing database information for " + tableNameWithAlias + ": ", e );
+      } finally {
+        if ( columns != null ) {
+          try {
+            columns.close();
+          } catch ( SQLException e ) {
+            logger.error( "Error closing result set with columns for " + tableNameWithAlias + ": ", e );
+          }
+        }
+
+      }
+    }
+    Long end = System.currentTimeMillis();
+    long l = ( end - start ) / 1000;
+    logger.error( "--------time spent: " + l );
+    return filteredTables;
   }
 
   public IDatasourceSummary serializeJoins( MultiTableDatasourceDTO dto, IDatabaseConnection connection )
